@@ -65,7 +65,8 @@ def build_prompt(db_id: str, question: str, schema: dict) -> str:
     return (
         "You are a SQLite SQL expert. "
         "Given the database schema below, write a single SQLite SQL query "
-        "to answer the question. Output ONLY the SQL query, with no explanation.\n\n"
+        "to answer the question. Output ONLY the SQL query on ONE single line, "
+        "with no markdown fences and no explanation.\n\n"
         f"Schema:\n{ddl}\n\n"
         f"Question: {question}\n\n"
         "SQL:"
@@ -81,20 +82,27 @@ def extract_sql(text: str) -> str:
 
     优先级：
     1. 匹配 ```sql ... ``` 或 ``` ... ``` 代码块（最稳定）
-    2. 取最后一行看起来像 SQL 的内容（兜底，应对模型在 SQL 后加解释的情况）
+    2. 从第一条 SQL 语句行取到文本末尾并拼成单行
+       （模型常输出多行 SQL，绝不能只取一行——截断 bug 的教训）
     3. 清理多余空白和尾部分号（sqlite 不介意分号，但 prompt 里统一去掉更干净）
     """
     # 1. markdown 代码块
     m = re.search(r"```(?:sql)?\s*(.*?)\s*```", text, re.S | re.I)
     if m:
         return m.group(1).strip().rstrip(";")
-    # 2. 按行过滤，取最后一行含 SELECT/INSERT/UPDATE/DELETE/WITH 的行
-    for line in reversed(text.strip().splitlines()):
-        line = line.strip()
-        if re.match(r"^(SELECT|INSERT|UPDATE|DELETE|WITH)\b", line, re.I):
-            return line.rstrip(";")
-    # 3. 全文本兜底清理
-    return text.strip().rstrip(";")
+    # 2. 无代码块时，从第一条 SQL 语句行取到文本末尾并拼成一行。
+    #    旧版"取最后一条以 SELECT 开头的行"默认 SQL 是单行的，模型输出
+    #    多行 SQL 时会把 FROM/ORDER BY/LIMIT 整段截掉——这正是上一轮
+    #    baseline 71% 样本报 no such column 的根因。
+    #    注意：这里不做"截尾修复"（比如发现 SQL 后面跟了解释就砍掉），
+    #    因为那会让提取器偷偷改写模型输出，污染 M2 的错误归因。
+    #    忠实提取 + 记录 raw，问题留给评测环节暴露。
+    lines = text.strip().splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^(SELECT|WITH|INSERT|UPDATE|DELETE)\b", line.strip(), re.I):
+            return " ".join(l.strip() for l in lines[i:]).rstrip(";")
+    # 3. 全文本兜底清理（压平所有空白）
+    return " ".join(text.split()).rstrip(";")
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +151,7 @@ def call_llm(
     """调用 LLM API，失败时按指数退避重试。
 
     对百度千帆等国内平台，偶尔会有 5xx 或 rate limit，退避能显著提高成功率。
-    第一次失败后等 1 秒，第二次 2 秒，第三次 4 秒。
+    第一次失败后等 2 秒，第二次 4 秒，第三次 8 秒。
     """
     last_err = None
     for attempt in range(max_retries):
@@ -158,7 +166,7 @@ def call_llm(
             return resp.choices[0].message.content or ""
         except Exception as exc:
             last_err = exc
-            wait = 2 ** attempt
+            wait = 2 ** (attempt + 1)
             print(f"  API 失败（{attempt + 1}/{max_retries}），{wait}s 后重试: {exc}")
             time.sleep(wait)
     raise last_err
@@ -215,6 +223,7 @@ def main() -> None:
             "question": question,
             "gold": gold_sql,
             "pred": None,
+            "raw": None,
             "api_error": None,
             "exec_success": False,
             "gold_exec_success": False,
@@ -232,6 +241,8 @@ def main() -> None:
         else:
             try:
                 raw = call_llm(client, model, prompt)
+                record["raw"] = raw
+                time.sleep(0.5)  # 简单限速，避免触发平台 RPM 限制
             except Exception as exc:
                 record["api_error"] = str(exc)
                 print(f"[{idx}/{total}] API 最终失败: {db_id} | {question}")
