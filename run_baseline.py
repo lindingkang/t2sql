@@ -33,6 +33,7 @@ import os
 import re
 import sqlite3
 import time
+from collections import Counter
 from pathlib import Path
 
 # 依赖说明见文件头。
@@ -127,14 +128,92 @@ def execute_sql(db_path: Path, sql: str) -> tuple[list[tuple], str | None]:
         return [], str(exc)
 
 
-def results_equal(a: list[tuple], b: list[tuple]) -> bool:
-    """比较两个结果集是否等价。
+def results_equal_strict(a: list[tuple], b: list[tuple]) -> bool:
+    """严格版比较（Spider 官方口径）。
 
-    转 set 比较（Spider 官方 eval 标准）。set 会忽略顺序和重复行，
-    这恰好对应"两条 SQL 是否返回相同数据内容"的语义。
-    注意：set 要求元素可 hash，tuple 天然满足。
+    结果集转 set：忽略行顺序和重复行，但**列顺序敏感**——gold 返回
+    (avg, max, type) 而 pred 返回 (type, avg, max) 判错。理由：用户
+    指定的列顺序是需求的一部分。这个口径的数字可直接与论文对比。
     """
     return set(a) == set(b)
+
+
+def results_equal_loose(a: list[tuple], b: list[tuple]) -> bool:
+    """宽松版比较（数据等价口径）。
+
+    每行的元素先排序再转 set：忽略行顺序、重复行，且**忽略列顺序**——
+    只要每行的数据内容相同即判对。用途：衡量模型"是否真正理解了问题"，
+    排除列顺序这种非语义差异的干扰。
+    """
+    if not a and not b:
+        return True
+    if not a or not b:
+        return False
+    if len(a[0]) != len(b[0]):
+        return False
+    # 同一行可能混含不同类型（如 ('dog', 5, 8)），Python 3 不允许 int 与 str
+    # 直接比较，故排序键用 (类型名, 值)：先按类型归组，只在同类值之间比较。
+    # 这样能忽略列顺序，又不会把数字 5 和文本 '5' 错误地等同。
+    def row_key(row: tuple) -> tuple:
+        return tuple(sorted(
+            (type(v).__name__, v if v is None or isinstance(v, (int, float, str))
+             else str(v))
+            for v in row
+        ))
+    return {row_key(r) for r in a} == {row_key(r) for r in b}
+
+
+def classify_failure(gold_sql: str, pred_sql: str,
+                     gold_res: list[tuple], pred_res: list[tuple]) -> str:
+    """对"执行成功但结果不对"的样本做失败类型分类（M2 体系的雏形）。
+
+    用规则启发式粗分，按固定优先级返回第一个命中的类别：
+    - column_order : 仅列顺序不同（宽松版判对，属测量口径差异）
+    - join_type    : JOIN 类型不同（LEFT/RIGHT/INNER/FULL，裸 join 算 INNER）
+    - set_op       : 集合操作不同（UNION/INTERSECT/EXCEPT）
+    - aggregate    : 聚合函数不同（COUNT/SUM/AVG/MIN/MAX）
+    - extra_join   : pred 的表引用次数多于 gold（一对多连表可能致行膨胀）
+    - other        : 兜底，M2 再人工细分
+    """
+    # 1. 仅列顺序差异（数据内容其实等价）
+    if results_equal_loose(gold_res, pred_res):
+        return "column_order"
+
+    gold_lower = gold_sql.lower()
+    pred_lower = pred_sql.lower()
+
+    # 2. JOIN 类型差异
+    join_types = ["left join", "right join", "inner join", "full join"]
+    gold_joins = {j for j in join_types if j in gold_lower}
+    pred_joins = {j for j in join_types if j in pred_lower}
+    if " join " in gold_lower and not gold_joins:
+        gold_joins.add("inner join")
+    if " join " in pred_lower and not pred_joins:
+        pred_joins.add("inner join")
+    if gold_joins != pred_joins:
+        return "join_type"
+
+    # 3. 集合操作差异
+    set_ops = ["intersect", "except", "union"]
+    gold_sets = {s for s in set_ops if s in gold_lower}
+    pred_sets = {s for s in set_ops if s in pred_lower}
+    if gold_sets != pred_sets:
+        return "set_op"
+
+    # 4. 聚合函数差异
+    aggs = ["count(", "sum(", "avg(", "min(", "max("]
+    gold_agg = {a for a in aggs if a in gold_lower}
+    pred_agg = {a for a in aggs if a in pred_lower}
+    if gold_agg != pred_agg:
+        return "aggregate"
+
+    # 5. 表引用次数差异（FROM + JOIN 次数粗略反映连表规模）
+    gold_tables = gold_lower.count(" from ") + gold_lower.count(" join ")
+    pred_tables = pred_lower.count(" from ") + pred_lower.count(" join ")
+    if pred_tables > gold_tables:
+        return "extra_join"
+
+    return "other"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +306,9 @@ def main() -> None:
             "api_error": None,
             "exec_success": False,
             "gold_exec_success": False,
-            "correct": False,
+            "correct": False,        # 严格版（官方口径）
+            "correct_loose": False,  # 宽松版（忽略列顺序）
+            "failure_type": None,    # 失败分类标签（M2 体系雏形）
             "error": None,
         }
 
@@ -273,12 +354,17 @@ def main() -> None:
             continue
 
         record["exec_success"] = True
-        record["correct"] = results_equal(gold_res, pred_res)
+        record["correct"] = results_equal_strict(gold_res, pred_res)
+        record["correct_loose"] = results_equal_loose(gold_res, pred_res)
+        if not record["correct"]:
+            record["failure_type"] = classify_failure(
+                gold_sql, pred_sql, gold_res, pred_res)
         status = "✓" if record["correct"] else "✗"
         print(f"[{idx}/{total}] {status} {db_id} | {question}")
         if not record["correct"]:
             print(f"         gold: {gold_sql}")
             print(f"         pred: {pred_sql}")
+            print(f"         失败类型: {record['failure_type']}")
 
         records.append(record)
 
@@ -287,7 +373,12 @@ def main() -> None:
     n_gold_fail = sum(1 for r in records if not r["gold_exec_success"] and not r["api_error"])
     n_exec_fail = sum(1 for r in records if not r["exec_success"] and r["gold_exec_success"])
     n_correct = sum(1 for r in records if r["correct"])
+    n_correct_loose = sum(1 for r in records if r.get("correct_loose"))
     n_evaluable = sum(1 for r in records if r["gold_exec_success"] and r["exec_success"])
+
+    # 失败类型分布（仅统计可评测且严格判错的样本）
+    failure_dist = Counter(r["failure_type"] for r in records
+                           if not r["correct"] and r["exec_success"] and r["gold_exec_success"])
 
     print("\n" + "=" * 50)
     print("Baseline 统计")
@@ -297,9 +388,17 @@ def main() -> None:
     print(f"Gold SQL 执行失败:{n_gold_fail}")
     print(f"Pred 可执行数:   {n_evaluable}")
     print(f"Pred 不可执行数: {n_exec_fail}")
-    print(f"执行准确率 (EA): {n_correct}/{n_evaluable} = {n_correct / n_evaluable:.1%}" if n_evaluable else "N/A")
-    print(f"可执行率 (ER):   {n_evaluable}/{total - n_api_fail - n_gold_fail} = "
-          f"{n_evaluable / max(1, total - n_api_fail - n_gold_fail):.1%}")
+    if n_evaluable:
+        print(f"执行准确率 (EA·严格): {n_correct}/{n_evaluable} = {n_correct / n_evaluable:.1%}  ← 官方口径，可与论文对比")
+        print(f"执行准确率 (EA·宽松): {n_correct_loose}/{n_evaluable} = {n_correct_loose / n_evaluable:.1%}  ← 忽略列顺序，衡量真实理解")
+    else:
+        print("执行准确率: N/A")
+    denom = max(1, total - n_api_fail - n_gold_fail)
+    print(f"可执行率 (ER):   {n_evaluable}/{denom} = {n_evaluable / denom:.1%}")
+    if failure_dist:
+        print("\n失败类型分布（严格判错的样本）：")
+        for ft, cnt in failure_dist.most_common():
+            print(f"  {ft:15s}: {cnt}")
 
     # ---------- 5. 保存 ----------
     with open(args.output, "w", encoding="utf-8") as f:
