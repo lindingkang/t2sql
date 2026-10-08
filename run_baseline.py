@@ -119,6 +119,11 @@ def execute_sql(db_path: Path, sql: str) -> tuple[list[tuple], str | None]:
     try:
         # uri 模式要求路径前加 file://
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        # 关键：Spider 数据集中部分库（如 wta_1）的文本字段存储为 Latin-1/cp1252
+        # 而非 UTF-8（如球员名 Albarracín 的 í = 单字节 0xED）。
+        # 默认 text_factory 遇到非法 UTF-8 会抛异常，导致所有含非 ASCII 字符的
+        # 查询结果集为空/报错。用 replacement char 兜底，保证至少能读出数据。
+        con.text_factory = lambda b: b.decode("utf-8", errors="replace")
         con.row_factory = sqlite3.Row
         cur = con.execute(sql)
         rows = [tuple(row) for row in cur.fetchall()]
