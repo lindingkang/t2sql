@@ -30,14 +30,8 @@ _BASELINE_INSTRUCTION = (
     "with no markdown fences and no explanation."
 )
 
-# improved：把 badcase 报告里的高频错误翻译成硬约束
-# 每条约束都对应 badcase_report.md 里统计的具体错误类型：
-#   - value_error(41)    -> "Match values exactly"
-#   - join_error(29)     -> "Use foreign keys for JOINs"
-#   - aggregate_error(25)-> "GROUP BY all non-aggregated columns"
-#   - set_logic_error(15)-> "INTERSECT=both, UNION=either"
-#   - schema_error(28)   -> "Use exact table/column names from DDL"
-_IMPROVED_INSTRUCTION = (
+# improved_v1：第一版改进（已验证无效，保留作对照）
+_IMPROVED_V1_INSTRUCTION = (
     "You are a SQLite SQL expert. Write a single SQLite SQL query "
     "to answer the question, following these rules strictly:\n"
     "1. Use EXACT table and column names from the schema below.\n"
@@ -54,6 +48,57 @@ _IMPROVED_INSTRUCTION = (
     "with no markdown fences and no explanation."
 )
 
+# improved_v2：基于 207 条精准 LLM 归因重新设计
+# 上一版 improved 没有显著提升（0.799→0.805，在 ±0.003 噪声内），根因是归因太粗。
+# 这一版每条约束都对应精准归因里的高频 root_cause + fix_prompt：
+#   - data_description_gap(45): 大小写/类型/格式不感知
+#   - join_error(36): JOIN 多了/少了/类型错
+#   - aggregation_error(25): 子查询嵌套、GROUP BY 规范
+#   - semantic_misunderstanding(69): 过度推断、漏列、误读"average"等词
+#   - set_logic_error(4): INTERSECT/UNION 语义
+_IMPROVED_V2_INSTRUCTION = (
+    "You are a SQLite SQL expert. Write a single SQLite SQL query "
+    "to answer the question, following these rules strictly:\n"
+    "\n"
+    "DATA AWARENESS:\n"
+    "1. String comparisons in SQLite are CASE-SENSITIVE. Check the schema for exact "
+    "column types; if a column is TEXT, its values may be lowercase (e.g. 'france' "
+    "not 'France'). When unsure, use case-insensitive matching: WHERE LOWER(col) = LOWER('value').\n"
+    "2. Do NOT CAST TEXT columns to numeric types for sorting or comparison unless the "
+    "question explicitly requires numeric ordering. TEXT columns sort lexicographically.\n"
+    "3. When the question mentions a word like 'average', 'highest', or 'result', "
+    "FIRST check if a column with that exact name exists in the schema. If yes, "
+    "SELECT that column directly — do NOT apply AVG()/MAX() to a different column.\n"
+    "\n"
+    "JOIN DISCIPLINE:\n"
+    "4. Only JOIN tables that have a foreign key relationship declared in the schema.\n"
+    "5. When counting child entities per parent (e.g. 'concerts per stadium'), use "
+    "INNER JOIN — do not include parents with zero children unless the question says "
+    "'all' or 'including those without'.\n"
+    "6. When the question asks to 'list IDs' of an entity, JOIN to that entity's main "
+    "table and SELECT the ID from there, not from a foreign key column in a child table.\n"
+    "\n"
+    "AGGREGATION RULES:\n"
+    "7. When the question asks 'how many X satisfy condition Y', wrap the filtering "
+    "logic in a subquery and apply COUNT(*) on the outside: "
+    "SELECT count(*) FROM (SELECT ... GROUP BY ... HAVING ...).\n"
+    "8. GROUP BY should include only the key columns needed for grouping. Do not add "
+    "functionally dependent columns unless the question asks for them.\n"
+    "\n"
+    "SELECT PRECISION:\n"
+    "9. The SELECT clause must include exactly the columns the question asks for — "
+    "no more, no less. If the question mentions 'name and age', return both.\n"
+    "10. Place aggregate columns (COUNT, AVG, MAX, etc.) before non-aggregated grouping "
+    "columns in the SELECT clause.\n"
+    "\n"
+    "SET LOGIC:\n"
+    "11. 'both X and Y' / 'X and Y are from' = INTERSECT. "
+    "'X or Y' / 'either X or Y' = UNION.\n"
+    "\n"
+    "Output ONLY the SQL query on ONE single line, "
+    "with no markdown fences and no explanation."
+)
+
 
 def build_prompt(db_id: str, question: str, schema: dict,
                  variant: str = "baseline") -> str:
@@ -65,7 +110,9 @@ def build_prompt(db_id: str, question: str, schema: dict,
     if variant == "baseline":
         instr = _BASELINE_INSTRUCTION
     elif variant == "improved":
-        instr = _IMPROVED_INSTRUCTION
+        instr = _IMPROVED_V2_INSTRUCTION
+    elif variant == "improved_v1":
+        instr = _IMPROVED_V1_INSTRUCTION
     else:
         raise ValueError(f"未知 prompt 变体: {variant}")
 

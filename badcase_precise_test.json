@@ -1,0 +1,44 @@
+[
+  {
+    "db_id": "concert_singer",
+    "question": "What is the maximum capacity and the average of all stadiums ?",
+    "gold": "select max(capacity), average from stadium",
+    "pred": "SELECT MAX(Capacity), AVG(Average) FROM stadium",
+    "gold_res_preview": "[(52500, 730)]",
+    "pred_res_preview": "[(52500, 917.8888888888889)]",
+    "diagnosis": {
+      "root_cause": "The model misinterpreted the phrase 'average of all stadiums' as requiring an aggregation function (AVG) on the 'Average' column, whereas the question simply asks to retrieve the existing 'Average' value stored in that column for the stadium table.",
+      "fix_prompt": "When a question asks for 'the average' and there is a column explicitly named 'Average', retrieve the value from that column directly instead of applying the AVG() aggregation function.",
+      "failure_type": "semantic_misunderstanding",
+      "is_gold_noise": false
+    }
+  },
+  {
+    "db_id": "concert_singer",
+    "question": "Show the stadium name and the number of concerts in each stadium.",
+    "gold": "SELECT T2.name ,  count(*) FROM concert AS T1 JOIN stadium AS T2 ON T1.stadium_id  =  T2.stadium_id GROUP BY T1.stadium_id",
+    "pred": "SELECT s.Name, COUNT(c.concert_ID) AS number_of_concerts FROM stadium s LEFT JOIN concert c ON s.Stadium_ID = c.Stadium_ID GROUP BY s.Stadium_ID",
+    "gold_res_preview": "[(\"Stark's Park\", 1), ('Glebe Park', 1), ('Somerset Park', 2)]",
+    "pred_res_preview": "[(\"Stark's Park\", 1), ('Somerset Park', 2), ('Bayview Stadium', 0)]",
+    "diagnosis": {
+      "root_cause": "The model used a LEFT JOIN instead of an INNER JOIN, causing it to include stadiums with zero concerts in the result set, which contradicts the requirement to show only stadiums that have hosted concerts.",
+      "fix_prompt": "When counting items associated with a parent entity (like concerts per stadium), ensure you use an INNER JOIN to exclude parent entities that have no matching child records, unless the question explicitly asks for all parents including those with zero counts.",
+      "failure_type": "join_error",
+      "is_gold_noise": false
+    }
+  },
+  {
+    "db_id": "concert_singer",
+    "question": "Show countries where a singer above age 40 and a singer below 30 are from.",
+    "gold": "SELECT country FROM singer WHERE age  >  40 INTERSECT SELECT country FROM singer WHERE age  <  30",
+    "pred": "SELECT Country FROM singer WHERE Age > 40 UNION SELECT Country FROM singer WHERE Age < 30",
+    "gold_res_preview": "[('France',)]",
+    "pred_res_preview": "[('France',), ('Netherlands',)]",
+    "diagnosis": {
+      "root_cause": "The model incorrectly used UNION to combine results from two conditions, whereas the question requires finding countries common to both age groups, which necessitates the INTERSECT operator.",
+      "fix_prompt": "When a question asks for items that satisfy multiple distinct conditions simultaneously (e.g., 'where X and Y are from'), use the INTERSECT operator instead of UNION to find the common elements between the result sets.",
+      "failure_type": "set_logic_error",
+      "is_gold_noise": false
+    }
+  }
+]
