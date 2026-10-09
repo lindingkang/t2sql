@@ -1,0 +1,568 @@
+[
+  {
+    "db_id": "concert_singer",
+    "query": "SELECT count(*) FROM singer",
+    "query_toks": [
+      "SELECT",
+      "count",
+      "(",
+      "*",
+      ")",
+      "FROM",
+      "singer"
+    ],
+    "query_toks_no_value": [
+      "select",
+      "count",
+      "(",
+      "*",
+      ")",
+      "from",
+      "singer"
+    ],
+    "question": "How many singers do we have?",
+    "question_toks": [
+      "How",
+      "many",
+      "singers",
+      "do",
+      "we",
+      "have",
+      "?"
+    ],
+    "sql": {
+      "from": {
+        "table_units": [
+          [
+            "table_unit",
+            1
+          ]
+        ],
+        "conds": []
+      },
+      "select": [
+        false,
+        [
+          [
+            3,
+            [
+              0,
+              [
+                0,
+                0,
+                false
+              ],
+              null
+            ]
+          ]
+        ]
+      ],
+      "where": [],
+      "groupBy": [],
+      "having": [],
+      "orderBy": [],
+      "limit": null,
+      "intersect": null,
+      "union": null,
+      "except": null
+    },
+    "gold": "SELECT count(*) FROM singer",
+    "pred": "SELECT COUNT(*) FROM singer",
+    "attempts": [],
+    "api_error": null,
+    "exec_success": true,
+    "correct": true
+  },
+  {
+    "db_id": "concert_singer",
+    "query": "SELECT count(*) FROM singer",
+    "query_toks": [
+      "SELECT",
+      "count",
+      "(",
+      "*",
+      ")",
+      "FROM",
+      "singer"
+    ],
+    "query_toks_no_value": [
+      "select",
+      "count",
+      "(",
+      "*",
+      ")",
+      "from",
+      "singer"
+    ],
+    "question": "What is the total number of singers?",
+    "question_toks": [
+      "What",
+      "is",
+      "the",
+      "total",
+      "number",
+      "of",
+      "singers",
+      "?"
+    ],
+    "sql": {
+      "from": {
+        "table_units": [
+          [
+            "table_unit",
+            1
+          ]
+        ],
+        "conds": []
+      },
+      "select": [
+        false,
+        [
+          [
+            3,
+            [
+              0,
+              [
+                0,
+                0,
+                false
+              ],
+              null
+            ]
+          ]
+        ]
+      ],
+      "where": [],
+      "groupBy": [],
+      "having": [],
+      "orderBy": [],
+      "limit": null,
+      "intersect": null,
+      "union": null,
+      "except": null
+    },
+    "gold": "SELECT count(*) FROM singer",
+    "pred": "SELECT COUNT(*) FROM singer",
+    "attempts": [],
+    "api_error": null,
+    "exec_success": true,
+    "correct": true
+  },
+  {
+    "db_id": "concert_singer",
+    "query": "SELECT name ,  country ,  age FROM singer ORDER BY age DESC",
+    "query_toks": [
+      "SELECT",
+      "name",
+      ",",
+      "country",
+      ",",
+      "age",
+      "FROM",
+      "singer",
+      "ORDER",
+      "BY",
+      "age",
+      "DESC"
+    ],
+    "query_toks_no_value": [
+      "select",
+      "name",
+      ",",
+      "country",
+      ",",
+      "age",
+      "from",
+      "singer",
+      "order",
+      "by",
+      "age",
+      "desc"
+    ],
+    "question": "Show name, country, age for all singers ordered by age from the oldest to the youngest.",
+    "question_toks": [
+      "Show",
+      "name",
+      ",",
+      "country",
+      ",",
+      "age",
+      "for",
+      "all",
+      "singers",
+      "ordered",
+      "by",
+      "age",
+      "from",
+      "the",
+      "oldest",
+      "to",
+      "the",
+      "youngest",
+      "."
+    ],
+    "sql": {
+      "from": {
+        "table_units": [
+          [
+            "table_unit",
+            1
+          ]
+        ],
+        "conds": []
+      },
+      "select": [
+        false,
+        [
+          [
+            0,
+            [
+              0,
+              [
+                0,
+                9,
+                false
+              ],
+              null
+            ]
+          ],
+          [
+            0,
+            [
+              0,
+              [
+                0,
+                10,
+                false
+              ],
+              null
+            ]
+          ],
+          [
+            0,
+            [
+              0,
+              [
+                0,
+                13,
+                false
+              ],
+              null
+            ]
+          ]
+        ]
+      ],
+      "where": [],
+      "groupBy": [],
+      "having": [],
+      "orderBy": [
+        "desc",
+        [
+          [
+            0,
+            [
+              0,
+              13,
+              false
+            ],
+            null
+          ]
+        ]
+      ],
+      "limit": null,
+      "intersect": null,
+      "union": null,
+      "except": null
+    },
+    "gold": "SELECT name ,  country ,  age FROM singer ORDER BY age DESC",
+    "pred": "SELECT Name, Country, Age FROM singer ORDER BY Age DESC",
+    "attempts": [],
+    "api_error": null,
+    "exec_success": true,
+    "correct": true
+  },
+  {
+    "db_id": "concert_singer",
+    "query": "SELECT name ,  country ,  age FROM singer ORDER BY age DESC",
+    "query_toks": [
+      "SELECT",
+      "name",
+      ",",
+      "country",
+      ",",
+      "age",
+      "FROM",
+      "singer",
+      "ORDER",
+      "BY",
+      "age",
+      "DESC"
+    ],
+    "query_toks_no_value": [
+      "select",
+      "name",
+      ",",
+      "country",
+      ",",
+      "age",
+      "from",
+      "singer",
+      "order",
+      "by",
+      "age",
+      "desc"
+    ],
+    "question": "What are the names, countries, and ages for every singer in descending order of age?",
+    "question_toks": [
+      "What",
+      "are",
+      "the",
+      "names",
+      ",",
+      "countries",
+      ",",
+      "and",
+      "ages",
+      "for",
+      "every",
+      "singer",
+      "in",
+      "descending",
+      "order",
+      "of",
+      "age",
+      "?"
+    ],
+    "sql": {
+      "from": {
+        "table_units": [
+          [
+            "table_unit",
+            1
+          ]
+        ],
+        "conds": []
+      },
+      "select": [
+        false,
+        [
+          [
+            0,
+            [
+              0,
+              [
+                0,
+                9,
+                false
+              ],
+              null
+            ]
+          ],
+          [
+            0,
+            [
+              0,
+              [
+                0,
+                10,
+                false
+              ],
+              null
+            ]
+          ],
+          [
+            0,
+            [
+              0,
+              [
+                0,
+                13,
+                false
+              ],
+              null
+            ]
+          ]
+        ]
+      ],
+      "where": [],
+      "groupBy": [],
+      "having": [],
+      "orderBy": [
+        "desc",
+        [
+          [
+            0,
+            [
+              0,
+              13,
+              false
+            ],
+            null
+          ]
+        ]
+      ],
+      "limit": null,
+      "intersect": null,
+      "union": null,
+      "except": null
+    },
+    "gold": "SELECT name ,  country ,  age FROM singer ORDER BY age DESC",
+    "pred": "SELECT Name, Country, Age FROM singer ORDER BY Age DESC",
+    "attempts": [],
+    "api_error": null,
+    "exec_success": true,
+    "correct": true
+  },
+  {
+    "db_id": "concert_singer",
+    "query": "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",
+    "query_toks": [
+      "SELECT",
+      "avg",
+      "(",
+      "age",
+      ")",
+      ",",
+      "min",
+      "(",
+      "age",
+      ")",
+      ",",
+      "max",
+      "(",
+      "age",
+      ")",
+      "FROM",
+      "singer",
+      "WHERE",
+      "country",
+      "=",
+      "'France",
+      "'"
+    ],
+    "query_toks_no_value": [
+      "select",
+      "avg",
+      "(",
+      "age",
+      ")",
+      ",",
+      "min",
+      "(",
+      "age",
+      ")",
+      ",",
+      "max",
+      "(",
+      "age",
+      ")",
+      "from",
+      "singer",
+      "where",
+      "country",
+      "=",
+      "value"
+    ],
+    "question": "What is the average, minimum, and maximum age of all singers from France?",
+    "question_toks": [
+      "What",
+      "is",
+      "the",
+      "average",
+      ",",
+      "minimum",
+      ",",
+      "and",
+      "maximum",
+      "age",
+      "of",
+      "all",
+      "singers",
+      "from",
+      "France",
+      "?"
+    ],
+    "sql": {
+      "from": {
+        "table_units": [
+          [
+            "table_unit",
+            1
+          ]
+        ],
+        "conds": []
+      },
+      "select": [
+        false,
+        [
+          [
+            5,
+            [
+              0,
+              [
+                0,
+                13,
+                false
+              ],
+              null
+            ]
+          ],
+          [
+            2,
+            [
+              0,
+              [
+                0,
+                13,
+                false
+              ],
+              null
+            ]
+          ],
+          [
+            1,
+            [
+              0,
+              [
+                0,
+                13,
+                false
+              ],
+              null
+            ]
+          ]
+        ]
+      ],
+      "where": [
+        [
+          false,
+          2,
+          [
+            0,
+            [
+              0,
+              10,
+              false
+            ],
+            null
+          ],
+          "\"France\"",
+          null
+        ]
+      ],
+      "groupBy": [],
+      "having": [],
+      "orderBy": [],
+      "limit": null,
+      "intersect": null,
+      "union": null,
+      "except": null
+    },
+    "gold": "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",
+    "pred": "SELECT AVG(Age), MIN(Age), MAX(Age) FROM singer WHERE Country = 'France'",
+    "attempts": [],
+    "api_error": null,
+    "exec_success": true,
+    "correct": true
+  }
+]

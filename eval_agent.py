@@ -40,6 +40,8 @@ def main() -> None:
     ap.add_argument("--baseline", default="baseline_full.json",
                     help="M0 基线结果文件，用于对比救回/退化")
     ap.add_argument("--max-retries", type=int, default=2)
+    ap.add_argument("--n-samples", type=int, default=1,
+                    help="自洽性投票采样数；1=纯重试，>=2=启用投票")
     args = ap.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -51,7 +53,9 @@ def main() -> None:
 
     dev = json.loads((SPIDER_DIR / "dev.json").read_text(encoding="utf-8"))
     schemas = load_schemas()
-    agent = Text2SQLAgent(client, model, schemas, max_retries=args.max_retries)
+    agent = Text2SQLAgent(client, model, schemas,
+                          max_retries=args.max_retries,
+                          n_samples=args.n_samples)
 
     # M0 基线按下标对齐，用于计算 rescued / regressed
     baseline = json.loads((ROOT / args.baseline).read_text(encoding="utf-8"))
@@ -65,6 +69,8 @@ def main() -> None:
     n_retry_success = 0   # 首轮执行失败、靠重试救回可执行性的条数
     n_api_fail = 0
     total_calls = 0
+    n_vote_consensus = 0   # 投票有共识的条数
+    n_vote_fallback = 0    # 投票无共识、fallback 到重试的条数
 
     print(f"开始 M1 Agent 评测：模型={model}，样本={total}，"
           f"最大重试={args.max_retries}\n")
@@ -75,10 +81,19 @@ def main() -> None:
         db_path = SPIDER_DIR / "database" / db_id / f"{db_id}.sqlite"
 
         result = agent.answer(db_id, sample["question"])
-        total_calls += len(result["attempts"])
+        total_calls += len(result["attempts"]) + (
+            args.n_samples if result.get("votes") else 0)
+
+        # 投票统计
+        if result.get("votes"):
+            if result["votes"]["consensus_sql"] is not None:
+                n_vote_consensus += 1
+            else:
+                n_vote_fallback += 1
 
         rec = {**sample, "gold": gold_sql,
                "pred": result["final_sql"], "attempts": result["attempts"],
+               "votes": result.get("votes"),
                "api_error": result["api_error"],
                "exec_success": result["ok"], "correct": False}
 
@@ -112,8 +127,14 @@ def main() -> None:
         mark = "✓" if rec["correct"] else ("!" if result["ok"] else "✗")
         retry_note = f" (重试{len(result['attempts']) - 1}轮救回)" if (
             len(result["attempts"]) >= 2 and result["ok"]) else ""
-        print(f"[{idx}/{total}] {mark} {db_id}{retry_note}")
+        print(f"[{idx}/{total}] {mark} {db_id}{retry_note}", flush=True)
         records.append(rec)
+
+        # 每 50 条保存一次，中途挂了不丢结果
+        if idx % 50 == 0:
+            (ROOT / args.output).write_text(
+                json.dumps(records, indent=2, ensure_ascii=False),
+                encoding="utf-8")
 
     print("\n" + "=" * 56)
     print("M1 Agent 评测结果")
@@ -126,6 +147,9 @@ def main() -> None:
     print(f"较 M0 救回 (rescued): {n_rescued}")
     print(f"较 M0 退化:          {n_regressed}  （应≈0，否则说明闭环有副作用）")
     print(f"重试救回可执行性:    {n_retry_success}  （M0 的 execution_error 被修复）")
+    if args.n_samples >= 2:
+        print(f"投票有共识:          {n_vote_consensus}  （直接取最大簇结果）")
+        print(f"投票无共识 fallback: {n_vote_fallback}  （走 M1 重试闭环）")
     print(f"平均 API 调用/题:    {total_calls / max(1, total - n_api_fail):.2f}")
 
     (ROOT / args.output).write_text(

@@ -231,19 +231,34 @@ def call_llm(
     prompt: str,
     max_retries: int = 3,
     timeout: int = 60,
+    temperature: float = 0.0,
 ) -> str:
     """调用 LLM API，失败时按指数退避重试。
 
     对百度千帆等国内平台，偶尔会有 5xx 或 rate limit，退避能显著提高成功率。
     第一次失败后等 2 秒，第二次 4 秒，第三次 8 秒。
+
+    temperature 参数：
+        0.0  = 确定性最高，用于 baseline 和单轮生成
+        > 0  = 促进多样性，用于自洽性投票的多采样
+
+    硬超时兜底：httpx 的 timeout 参数在 TCP 连接阶段可能不被严格遵守
+    （实测会永久挂起），用 signal.alarm 做第二道防线。
     """
+    import signal
+
+    def _alarm_handler(signum, frame):
+        raise TimeoutError(f"API 调用超过 {timeout+30}s 硬超时")
+
     last_err = None
     for attempt in range(max_retries):
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout + 30)  # 比 httpx timeout 多 30s 兜底
         try:
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,        # 确定性最高，减少随机波动
+                temperature=temperature,
                 max_tokens=512,
                 timeout=timeout,
             )
@@ -253,6 +268,9 @@ def call_llm(
             wait = 2 ** (attempt + 1)
             print(f"  API 失败（{attempt + 1}/{max_retries}），{wait}s 后重试: {exc}")
             time.sleep(wait)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
     raise last_err
 
 
