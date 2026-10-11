@@ -36,12 +36,22 @@ ROOT = Path(__file__).resolve().parent
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--limit", type=int, default=1034)
-    ap.add_argument("--output", default="agent_eval_full.json")
+    ap.add_argument("--output", default="agent_eval_m3.json")
     ap.add_argument("--baseline", default="baseline_full.json",
                     help="M0 基线结果文件，用于对比救回/退化")
     ap.add_argument("--max-retries", type=int, default=2)
     ap.add_argument("--n-samples", type=int, default=1,
                     help="自洽性投票采样数；1=纯重试，>=2=启用投票")
+    ap.add_argument("--vote-temperature", type=float, default=0.7,
+                    help="投票采样温度；默认 0.7 产生多样性")
+    ap.add_argument("--adaptive", action="store_true",
+                    help="M3 自适应投票：多数决早停")
+    ap.add_argument("--cache", action="store_true",
+                    help="M3 L1 确定性响应磁盘缓存")
+    ap.add_argument("--no-confirm-empty", dest="confirm_empty",
+                    action="store_false", help="关闭空结果二次确认")
+    ap.add_argument("--log-dir", default=None,
+                    help="M3 结构化 JSONL 日志目录（可选）")
     args = ap.parse_args()
 
     load_dotenv(ROOT / ".env")
@@ -53,9 +63,22 @@ def main() -> None:
 
     dev = json.loads((SPIDER_DIR / "dev.json").read_text(encoding="utf-8"))
     schemas = load_schemas()
+    llm_cache = None
+    if args.cache:
+        from cache import LLMCache
+        llm_cache = LLMCache()
+    trace_logger = None
+    if args.log_dir:
+        from logger import AgentLogger
+        trace_logger = AgentLogger(log_dir=args.log_dir, verbose=True)
     agent = Text2SQLAgent(client, model, schemas,
                           max_retries=args.max_retries,
-                          n_samples=args.n_samples)
+                          n_samples=args.n_samples,
+                          vote_temperature=args.vote_temperature,
+                          confirm_empty=args.confirm_empty,
+                          adaptive=args.adaptive,
+                          llm_cache=llm_cache,
+                          logger=trace_logger)
 
     # M0 基线按下标对齐，用于计算 rescued / regressed
     baseline = json.loads((ROOT / args.baseline).read_text(encoding="utf-8"))
@@ -69,8 +92,12 @@ def main() -> None:
     n_retry_success = 0   # 首轮执行失败、靠重试救回可执行性的条数
     n_api_fail = 0
     total_calls = 0
+    total_tokens = 0
+    total_cache_hits = 0
     n_vote_consensus = 0   # 投票有共识的条数
     n_vote_fallback = 0    # 投票无共识、fallback 到重试的条数
+    n_empty_confirm_triggered = 0
+    n_empty_confirm_adopted = 0
 
     print(f"开始 M1 Agent 评测：模型={model}，样本={total}，"
           f"最大重试={args.max_retries}\n")
@@ -81,8 +108,14 @@ def main() -> None:
         db_path = SPIDER_DIR / "database" / db_id / f"{db_id}.sqlite"
 
         result = agent.answer(db_id, sample["question"])
-        total_calls += len(result["attempts"]) + (
-            args.n_samples if result.get("votes") else 0)
+        meter = result.get("meter") or {}
+        total_calls += meter.get("api_calls", 0)
+        total_tokens += meter.get("total_tokens", 0)
+        total_cache_hits += meter.get("cache_hits", 0)
+        if result.get("empty_confirm"):
+            n_empty_confirm_triggered += 1
+            if result["empty_confirm"].get("adopted"):
+                n_empty_confirm_adopted += 1
 
         # 投票统计
         if result.get("votes"):
@@ -94,6 +127,9 @@ def main() -> None:
         rec = {**sample, "gold": gold_sql,
                "pred": result["final_sql"], "attempts": result["attempts"],
                "votes": result.get("votes"),
+               "empty_confirm": result.get("empty_confirm"),
+               "meter": result.get("meter"),
+               "elapsed_ms": result.get("elapsed_ms"),
                "api_error": result["api_error"],
                "exec_success": result["ok"], "correct": False}
 
@@ -151,10 +187,17 @@ def main() -> None:
         print(f"投票有共识:          {n_vote_consensus}  （直接取最大簇结果）")
         print(f"投票无共识 fallback: {n_vote_fallback}  （走 M1 重试闭环）")
     print(f"平均 API 调用/题:    {total_calls / max(1, total - n_api_fail):.2f}")
+    print(f"总 token 消耗:       {total_tokens}")
+    print(f"L1 缓存命中:         {total_cache_hits}")
+    print(f"空结果确认触发:      {n_empty_confirm_triggered}")
+    print(f"空结果确认采纳:      {n_empty_confirm_adopted}")
 
     (ROOT / args.output).write_text(
         json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"\n完整 trace 已保存: {args.output}")
+
+    if trace_logger is not None:
+        trace_logger.close()
 
 
 if __name__ == "__main__":

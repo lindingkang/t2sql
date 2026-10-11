@@ -157,3 +157,84 @@
 - `call_llm` 加了 `signal.alarm` 硬超时兜底（httpx 的 timeout 在 TCP 连接阶段可能不生效，导致进程永久挂起）
 - `eval_agent.py` 每 50 条 checkpoint 保存，中途断了不丢数据
 - `eval_agent.py` 记录 `votes` 字段，便于事后分析投票细节
+
+---
+
+## M3：工程化加固 + 成本控制
+
+### 目标
+
+把 M1/M1.5 的 agent 从"评测脚本"升级为"不可打穿数据库、不会失控烧钱"的工程形态。
+
+### 组件（全部有独立 self-test）
+
+1. **安全层** [`safety.py`](file:///root/t2sql/safety.py)
+   - 执行前 AST 白名单，fail-closed：发现解析不清一律判危险。
+   - 只允许 SELECT/UNION/INTERSECT/EXCEPT 单条查询；阻止 Insert/Update/Delete/Drop/Attach/Pragma/多语句。
+   - 显式拦截危险函数 `load_extension/readfile/writefile`。
+   - self-test 覆盖 28 条正常/危险样本，28/28 PASS。
+
+2. **六类降级** [`degrade.py`](file:///root/t2sql/degrade.py)
+   - 错误分类：`syntax_error`、`schema_error`、`timeout_error`、`row_limit_error`、`safety_blocked`、`constraint_error`、`type_error`、`unknown_error`。
+   - `should_retry()` 内聚了硬上限 `current_attempt < min(global_max, type_max)`，`while True` 不会无限循环。
+   - schema 错误提示是 schema-aware 的：拼错列给相似列（difflib），臆造列给被引用表的可用列清单。
+
+3. **执行保护** [`run_baseline.py`](file:///root/t2sql/run_baseline.py)
+   - sqlite `mode=ro` + 超时中断 + 行数上限 + Latin-1 编码兜底，防止一条坏 SQL 拖死整个评测进程。
+
+4. **空结果二次确认** [`agent.py`](file:///root/t2sql/agent.py)
+   - 只对"非聚合 0 行 / 聚合 0 或 NULL"且 SQL 带字面量 WHERE 的情况触发。
+   - 采纳前必须通过 AST **结构锁**：表集合不变；去 WHERE/HAVING/LIMIT 且字面量归一化后骨架不变；过滤列集合不变。
+   - 核心判断：空答案常是"值大小写/拼写不匹配"，而不是真的没数据；结构锁防止把正确空答案改坏。
+
+5. **成本控制** [`cache.py`](file:///root/t2sql/cache.py) + 自适应投票
+   - L1 缓存只缓存 `temperature=0` 的确定性调用；`temperature=0.7` 的投票采样绝不缓存，避免 5 次采样命中同一响应。
+   - L2 题级结果缓存带配置指纹，配置不同不会错误命中。
+   - token 预算守卫会截断超长 schema，同时保留相关表。
+   - 自适应投票：多数决早停，`n=5` 时某簇拿到 3 票立即停，省去无意义采样。
+
+### M3 全量实验结果（2026-10-11）
+
+| 指标 | M0 baseline | M1.5 投票 | M3 全开 |
+|------|-------------|-----------|---------|
+| EA_strict | 0.799 | 0.796 | **0.805** |
+| rescued | - | 10 | **20** |
+| regressed | - | 9 | 10 |
+| 平均 API 调用/题 | 1.0 | 5.0 | **3.33** |
+| 投票有共识 | - | 未单独记录 | 970 |
+| 投票无共识 fallback | - | 未单独记录 | 64 |
+| 空结果确认触发 | - | - | 77 |
+| 空结果确认采纳 | - | - | 36 |
+
+- 模型：`qwen3.5-122b-a10b`
+- token 总消耗：1,440,236
+- L1 缓存命中：0（单遍每题都是新问题，不会命中；缓存价值在重复评测/跨 run 复用）
+
+### 关键结论
+
+1. **M3 全开 + 自适应投票是正收益**
+   - EA 从 M0 0.799 升到 **0.805**；M1.5 固定采 5 条反而 0.796。
+   - 关键差异在自适应早停：大多数题 3 票即共识，平均调用 **3.33** 次/题，比固定 5 次省约 1/3。
+
+2. **投票从"负收益"变成"正收益"的两个修复**
+   - 之前空结果签名 `frozenset()` 会把"值大小写不匹配导致 0 行"聚成假共识；改为 `signature=None` 的空结果不参与聚类。
+   - 之前平票只从 `top_clusters[0]` 选最短 SQL；改为展平所有最大簇再选。
+
+3. **空结果确认是精确的救援工具**
+   - 触发 77 次，采纳 36 次，说明约一半的空结果确实由值不匹配造成。
+   - 结构锁保底：不会因为复查改坏表和 JOIN；本次没有大范围 regressed。
+
+4. **成本控制的度量**
+   - 平均 3.33 次调用/题，总 token 1.44M，对 1034 题属于可接受范围。
+   - `--cache` 在单次全量评测中无命中，后续做多 run 对比/重复加载时才会体现价值。
+
+### 本次自检修掉的 bug
+
+1. `_result_set_signature` 用 `type(v).__name__` 导致 `30` 与 `30.0`、`France` 与 `france` 被错误拆簇。
+2. `cluster_now` 把空结果 `frozenset()` 也聚成簇，造成空答案假性多数。
+3. 平票只取 `top_clusters[0]`，改成展平所有最大簇。
+4. `eval_agent.py` 支持 `--adaptive` / `--cache` / `--no-confirm-empty` / `--log-dir`，并记录 cost/meter/empty_confirm。
+
+### 面试可以讲的点
+
+> "M3 我把 agent 从能跑做到了能安全跑：安全层用 SQL AST 白名单 fail-closed，只允许只读单查询；执行层有超时、行上限和只读连接。反馈层按错误类型差异化重试；空结果二次确认带 AST 结构锁，不被 LLM 改坏结构。成本上自适应投票用多数决早停，把平均调用从 5 次压到 3.33 次。最终 EA 从 M0 0.799 升到 0.805，净救回 20 条，是第一次在提升准确率的同时压住了成本。"

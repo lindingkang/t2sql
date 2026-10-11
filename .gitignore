@@ -8,3 +8,12 @@ __pycache__/
 
 # 环境变量与 API key（M1 起调模型 API 会用到，key 泄露进 git 历史基本无法彻底清除）
 .env
+
+# 运行时产物与评测结果（大文件不入库，结论维护在 learning_notes.md）
+.cache/
+.vscode/
+*.log
+*.pid
+m3_eval_logs/
+_*.txt
+/agent_eval_m3.json

@@ -110,13 +110,46 @@ def extract_sql(text: str) -> str:
 # 执行与比较（评测核心）
 # ---------------------------------------------------------------------------
 
-def execute_sql(db_path: Path, sql: str) -> tuple[list[tuple], str | None]:
+# M3 模块2：执行加固的两个阈值。
+# 数值不是拍脑袋，是基于全量 1034 条 gold SQL 的实测分布定的：
+#   - 最慢 gold 查询 4.3s（wta_1 大表聚合），故 timeout=10s 留 2 倍余量，
+#     正常查询永不触发，只拦笛卡尔积炸弹（如三表自连接实测 0.3s 即被中断）。
+#   - 最大 gold 结果集 20662 行（wta_1 全球员名单），故 row_limit=50000
+#     留 2.4 倍余量，gold 永不被截断，评测口径保持不变。
+DEFAULT_EXEC_TIMEOUT = 10.0   # 秒
+DEFAULT_ROW_LIMIT = 50_000    # 单次查询最多返回行数
+
+
+def execute_sql(db_path: Path, sql: str,
+                timeout: float = DEFAULT_EXEC_TIMEOUT,
+                row_limit: int = DEFAULT_ROW_LIMIT
+                ) -> tuple[list[tuple], str | None]:
     """在指定 sqlite 文件上执行 SQL，返回 (结果集, 错误信息)。
 
-    用只读连接（uri=true + mode=ro），即使 SQL 里被注入恶意语句
-    也改不了磁盘数据。这是 M3 安全层的基础，M0 就提前引入。
+    三道保护：
+    1. 只读连接（uri=true + mode=ro）：即使 SQL 被注入写操作也改不了磁盘，
+       这是 M3 安全层的第二道防线（第一道是 safety.py 的 AST 白名单）。
+    2. 执行超时（set_progress_handler）：每 1000 条字节码指令回调一次，
+       超过 timeout 秒返回 1 请求 sqlite 中断（抛 OperationalError:
+       interrupted），防止笛卡尔积/全表扫描把进程拖死。投票阶段同题执行
+       N 条 SQL，炸弹风险放大 N 倍，这层必不可少。
+    3. 行数上限（fetchmany 惰性计数）：只 fetch row_limit+1 行，多取到 1 行
+       即判定超限，防止内存爆炸。刻意不采用 "SELECT * FROM (<sql>) LIMIT n"
+       的 SQL 包裹法——包裹会改变 ORDER BY 的列作用域（flight_2 的复合查询
+       badcase 已验证），且可能改变执行计划；在 Python 侧计数对 SQL 零改写。
+
+    超限时 err 带标准前缀（EXEC_TIMEOUT / ROW_LIMIT_EXCEEDED），
+    供 degrade.classify_execution_error 识别并选择降级路径。
     """
+    con = None
     try:
+        start = time.monotonic()
+
+        def _progress_handler() -> int:
+            # sqlite 每执行约 1000 条虚拟机指令回调一次。
+            # 返回 0 继续执行，返回非 0 请求中断（OperationalError: interrupted）。
+            return 1 if (time.monotonic() - start) > timeout else 0
+
         # uri 模式要求路径前加 file://
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         # 关键：Spider 数据集中部分库（如 wta_1）的文本字段存储为 Latin-1/cp1252
@@ -125,12 +158,29 @@ def execute_sql(db_path: Path, sql: str) -> tuple[list[tuple], str | None]:
         # 查询结果集为空/报错。用 replacement char 兜底，保证至少能读出数据。
         con.text_factory = lambda b: b.decode("utf-8", errors="replace")
         con.row_factory = sqlite3.Row
+        con.set_progress_handler(_progress_handler, 1000)
         cur = con.execute(sql)
-        rows = [tuple(row) for row in cur.fetchall()]
-        con.close()
+
+        # 惰性取 row_limit+1 行：若真有第 n+1 行，说明结果集超限。
+        fetched = cur.fetchmany(row_limit + 1)
+        rows = [tuple(row) for row in fetched]
+        if len(rows) > row_limit:
+            return rows[:row_limit], (
+                f"ROW_LIMIT_EXCEEDED: 结果集超过 {row_limit} 行上限，"
+                f"已截断（请增加 WHERE 过滤或 LIMIT，避免无界查询）")
         return rows, None
+    except sqlite3.OperationalError as exc:
+        # progress handler 主动中断时 sqlite 的报错文本就是 "interrupted"，
+        # 翻译成可读的超时标记，便于 degrade 走 timeout 降级路径。
+        if str(exc).strip().lower() == "interrupted":
+            return [], (f"EXEC_TIMEOUT: 查询执行超过 {timeout:g}s 被中断"
+                        f"（可能存在笛卡尔积或缺失 JOIN 条件）")
+        return [], str(exc)
     except Exception as exc:
         return [], str(exc)
+    finally:
+        if con is not None:
+            con.close()
 
 
 def results_equal_strict(a: list[tuple], b: list[tuple]) -> bool:
@@ -225,15 +275,15 @@ def classify_failure(gold_sql: str, pred_sql: str,
 # API 调用（带指数退避重试）
 # ---------------------------------------------------------------------------
 
-def call_llm(
+def call_llm_with_usage(
     client: OpenAI,
     model: str,
     prompt: str,
     max_retries: int = 3,
     timeout: int = 60,
     temperature: float = 0.0,
-) -> str:
-    """调用 LLM API，失败时按指数退避重试。
+) -> tuple[str, dict]:
+    """调用 LLM API，返回 (content, usage)。失败时按指数退避重试。
 
     对百度千帆等国内平台，偶尔会有 5xx 或 rate limit，退避能显著提高成功率。
     第一次失败后等 2 秒，第二次 4 秒，第三次 8 秒。
@@ -244,6 +294,10 @@ def call_llm(
 
     硬超时兜底：httpx 的 timeout 参数在 TCP 连接阶段可能不被严格遵守
     （实测会永久挂起），用 signal.alarm 做第二道防线。
+
+    M3 新增 usage 返回：{"prompt_tokens": int, "completion_tokens": int,
+    "total_tokens": int}，用于成本看板。接口未返回 usage 时给 0 兜底，
+    不影响主流程（成本计量是可观测能力，不是正确性依赖）。
     """
     import signal
 
@@ -262,7 +316,14 @@ def call_llm(
                 max_tokens=512,
                 timeout=timeout,
             )
-            return resp.choices[0].message.content or ""
+            content = resp.choices[0].message.content or ""
+            u = getattr(resp, "usage", None)
+            usage = {
+                "prompt_tokens": getattr(u, "prompt_tokens", 0) or 0,
+                "completion_tokens": getattr(u, "completion_tokens", 0) or 0,
+                "total_tokens": getattr(u, "total_tokens", 0) or 0,
+            }
+            return content, usage
         except Exception as exc:
             last_err = exc
             wait = 2 ** (attempt + 1)
@@ -272,6 +333,21 @@ def call_llm(
             signal.alarm(0)
             signal.signal(signal.SIGALRM, old_handler)
     raise last_err
+
+
+def call_llm(
+    client: OpenAI,
+    model: str,
+    prompt: str,
+    max_retries: int = 3,
+    timeout: int = 60,
+    temperature: float = 0.0,
+) -> str:
+    """旧接口：只返回 content。内部转调 call_llm_with_usage（M3 起带计量）。"""
+    content, _usage = call_llm_with_usage(
+        client, model, prompt, max_retries=max_retries,
+        timeout=timeout, temperature=temperature)
+    return content
 
 
 # ---------------------------------------------------------------------------
