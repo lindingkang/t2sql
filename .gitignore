@@ -17,3 +17,8 @@ __pycache__/
 m3_eval_logs/
 _*.txt
 /agent_eval_m3.json
+/_scratch/
+
+# M4 目录：生成数据与评测明细不入库，只提交 .py 脚本（结论维护在 learning_notes.md）
+m4/*
+!m4/*.py

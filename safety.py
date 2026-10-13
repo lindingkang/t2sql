@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import ParseError
 
 # 显式枚举的只读查询根节点。WITH ... SELECT 在 sqlglot 中根节点仍是 Select
 # （CTE 挂在 root.args["with"] 上），无需单独加 CTE 类型。
@@ -82,7 +81,7 @@ def check_readonly(sql: str) -> tuple[bool, str | None]:
     try:
         statements = [s for s in sqlglot.parse(sql.strip(), read="sqlite")
                       if s is not None]
-    except ParseError as exc:
+    except Exception as exc:  # ParseError/TokenError 等畸形 SQL 均 fail-closed
         # 解析失败 = 无法证明安全，fail-closed 拒绝，交给重试循环修正语法。
         first_line = str(exc).splitlines()[0][:120]
         return False, f"SQL 解析失败，无法确认安全性: {first_line}"

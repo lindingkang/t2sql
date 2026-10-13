@@ -238,3 +238,81 @@
 ### 面试可以讲的点
 
 > "M3 我把 agent 从能跑做到了能安全跑：安全层用 SQL AST 白名单 fail-closed，只允许只读单查询；执行层有超时、行上限和只读连接。反馈层按错误类型差异化重试；空结果二次确认带 AST 结构锁，不被 LLM 改坏结构。成本上自适应投票用多数决早停，把平均调用从 5 次压到 3.33 次。最终 EA 从 M0 0.799 升到 0.805，净救回 20 条，是第一次在提升准确率的同时压住了成本。"
+
+---
+
+## M4：SFT/QLoRA 与同模型公平对比
+
+### 关键修正：同模型公平基准
+- 之前的 M0 / M1.5 / M3 数字来自外部大模型（qwen3.5-122b），但 M4 SFT 后是本地 Qwen2.5-Coder-7B-Instruct + LoRA。两者不能直接对比。
+- 因此用同一个本地 7B base，按 `m4/eval_local_base.py --limit 1034` 复跑 `M0 / M2 / M1.5 / M3`，和 `m4/sft_eval_result.json` 同口径对比。
+- 全量等于 Spider dev 全量：1034 条。
+
+### 口径（每个值都有分子/分母）
+- `ER` = `exec_ok / 1034`：预测 SQL 执行成功比例。
+- `EA_strict` = `正确条数 / 1034`，要求 gold 与 pred 的执行结果**按列顺序严格一致**（列顺序不同判错）。
+- `EA_loose` = `正确条数 / 1034`，只看最终取值是否一致，**忽略列顺序**。
+
+### 最终同模型对照表（分母统一 = 1034）
+
+| 方案 | ER | EA_strict | EA_loose |
+|------|----|-----------|----------|
+| M0 local base | 956/1034 = 0.9246 | 759/1034 = 0.7340 | 787/1034 = 0.7611 |
+| M2 local base improved_v2 prompt | 982/1034 = 0.9497 | 765/1034 = 0.7398 | 787/1034 = 0.7611 |
+| M1.5 local base 投票 | 1023/1034 = 0.9894 | 797/1034 = 0.7708 | 830/1034 = 0.8027 |
+| M3 local base agent | 1023/1034 = 0.9894 | 810/1034 = 0.7834 | 845/1034 = 0.8172 |
+| M4 SFT（sft_cons_v1） | 992/1034 = 0.9594 | 823/1034 = 0.7959 | 851/1034 = 0.8230 |
+
+### 成本叙事（这才是 M4 SFT 的价值）
+- 同模型本地基准里，M3 不是早期的 3.33 次/题（那是另一个模型的旧结果）；本地复跑实际是：
+  - `total_calls = 5331`，`5331 / 1034 = 5.16` 次/题。
+- M4 SFT 每道题只做 **1 次前向**。
+- 结论：本地 7B 单次前向 EA_strict `823/1034 = 0.7959`，略高于本地 agent 管道（5.16 次调用 + 重试 + 投票）的 `810/1034 = 0.7834`。
+- 本质是「把 agent 管线的能力蒸馏进单次生成」。这是完整的部署故事，比「涨了 1.26 个点」更有说服力。
+
+### M4 SFT 训练细节
+- adapter：`/root/autodl-tmp/m4_lora/sft_cons_v1`
+- 数据源：只来自 `train_spider.json + train_others.json`，`dev.json` 从未进入训练。
+- QLoRA：4bit NF4 + double quant，LoRA `r=16 / alpha=32 / dropout=0.05`，target_modules 覆盖 q/k/v/o/gate/up/down projection。
+- 监督方式：只对 assistant 输出计算交叉熵，system/user prompt 的 labels 用 `-100` 掩码。
+
+### 保守版 SFT vs 严格版 SFT
+两者共同点：都会剔除 `exec_ok=False` 的 gold 样本；都按 `(db_id, question, gold_sql)` 内部去重。
+
+| 版本 | 剔除规则 | 文件 | 样本数 |
+|------|----------|------|--------|
+| 保守版 | 只剔 `exec_ok=False` | `m4/train_conservative.jsonl` | 8621 |
+| 严格版 | 再剔 `empty_result` 和 `scalar_question_multirow` | `m4/train_strict.jsonl` | 7005 |
+
+- 本次训练和评测用的是**保守版**：`train_conservative.jsonl`。
+- `empty_result`：gold SQL 执行返回 0 行。
+- `scalar_question_multirow`：问题在语义上是「单个标量」，gold 却返回了多行。
+
+### Dev 泄漏审计
+- 脚本：`m4/final_leak_audit.py`，输出 `m4/leak_audit_final.json`。
+- 采样规范化后的 question / SQL 做四档检查（保守版 8621 条 vs dev 1034 条，严格版同结论）：
+
+| 重叠类型 | 保守版 | 严格版 |
+|----------|--------|--------|
+| `(db_id, question, gold_sql)` 完全一致 | 0 | 0 |
+| 同一数据库 + 同一问题问法 | 0 | 0 |
+| 仅 question 字符串相同（不同数据库） | 7 | 7 |
+| 仅 gold SQL 字符串相同（平凡 count(*) 等） | 10 | 10 |
+
+- 结论：真泄漏（同库同题同 SQL）为 0。7 条 question-only 是 Spider train/dev 按数据库切分造成的同问法但不同库，10 条 sql-only 是 `SELECT count(*) FROM table` 这类平凡 SQL，均不构成 dev 泄漏。
+
+### 逐阶段优化 / 退化案例
+- 脚本：`m4/generate_case_transitions.py`
+- 明细：`m4/case_transitions.txt`（含每条的 before/after SQL 和 `strict / loose / exec / failure_type` 状态）
+- 摘要：`m4/case_transitions.json`
+
+严格口径下的阶段变化：
+
+| 阶段 | 优化 case | 退化 case |
+|------|-----------|-----------|
+| M0 → M2 | 60 | 54 |
+| M2 → M1.5 | 82 | 50 |
+| M1.5 → M3 | 51 | 38 |
+| M3 → M4 SFT | 67 | 54 |
+
+回看案例时务必同时看 `loose` 标记：有些「退化」可能只是列顺序变化，属于宽松口径下的伪退化。"
