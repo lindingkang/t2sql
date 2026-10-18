@@ -1,8 +1,0 @@
-=== improved_smoke_run1 ===
-total:      10
-api_fail:   0
-evaluable:  10
-exec_rate:  1.000
-EA_strict:  1.000  (10/10)
-EA_loose:   1.000  (10/10)
-failure_dist:

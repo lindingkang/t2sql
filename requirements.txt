@@ -1,0 +1,15 @@
+# 核心依赖（推理 + 评测 + agent）
+openai
+python-dotenv
+sqlglot
+
+# 后训练依赖（SFT / DPO / GRPO，需 GPU）
+# 注：这部分建议通过 scripts/install_env.py 安装（含版本兼容性处理），
+# 直接 pip 装最新版可能在 TRL/transformers 版本组合上不兼容。
+transformers
+peft
+trl
+bitsandbytes
+accelerate
+datasets
+sentencepiece
