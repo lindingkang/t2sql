@@ -22,3 +22,6 @@ _*.txt
 # M4 目录：生成数据与评测明细不入库，只提交 .py 脚本（结论维护在 learning_notes.md）
 m4/*
 !m4/*.py
+!m4/analysis/
+m4/analysis/*
+!m4/analysis/*.py

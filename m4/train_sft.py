@@ -167,6 +167,8 @@ def _compute_warmup_steps(args: argparse.Namespace, n_train: int) -> int:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base-model", default=DEFAULT_BASE)
+    p.add_argument("--base-adapter", default=None,
+                   help="继续训练已有 adapter（from this adapter）而非 from base 新起 LoRA")
     p.add_argument("--train-file", default=DEFAULT_TRAIN)
     p.add_argument("--output-dir", default=DEFAULT_OUT)
     p.add_argument("--limit", type=int, default=None,
@@ -242,18 +244,22 @@ def main() -> None:
     model.config.use_cache = False
     model = prepare_model_for_kbit_training(model)
 
-    lora_config = LoraConfig(
-        r=args.lora_r,
-        lora_alpha=args.lora_alpha,
-        lora_dropout=args.lora_dropout,
-        bias="none",
-        task_type="CAUSAL_LM",
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
-    )
-    model = get_peft_model(model, lora_config)
+    if args.base_adapter:
+        model = PeftModel.from_pretrained(model, args.base_adapter, is_trainable=True)
+        log(f"continue from adapter: {args.base_adapter}")
+    else:
+        lora_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+        )
+        model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     log("peft model ready")
 
