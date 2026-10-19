@@ -72,4 +72,4 @@ t2sql/
 - **三种对齐范式（DPO / RFT / GRPO）在同一基线失效，根因统一为「训练分布饱和」**：EA 0.8104 已是该 SFT 模型训练分布的局部最优，任何同分布微调都推不动最后那一两个点（DPO 零梯度、RFT 边际信息≈0、GRPO 熵塌缩）。
 - **agent 的纠错能力可蒸馏进权重**（repair-aware SFT：自纠错 71% → 82%）。
 
-详见 `reports/FINAL_REPORT.md`（面试精简版）与根目录 `learning_notes.md`（完整事实源）。
+详见 `reports/FINAL_REPORT.md`（结论精简版）与根目录 `learning_notes.md`（完整事实源）。
